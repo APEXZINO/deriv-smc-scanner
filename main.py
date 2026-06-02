@@ -87,9 +87,34 @@ def get_h1_structure(h1) -> str:
 # Ensure these functions are included as per your previous logic.
 
 # ── Execution ────────────────────────────────────────────────────────────────
-async def run_scan():
-    h1, m15, m5 = await fetch_all()
-    if h1 is None: return
+async def fetch_all():
+    try:
+        # Connect with a ping timeout to keep the connection alive
+        async with websockets.connect(CFG.uri, ping_timeout=10) as ws:
+            # Use wait_for to prevent infinite hangs during auth
+            await asyncio.wait_for(ws.send(json.dumps({"authorize": CFG.api_token})), timeout=10)
+            auth_resp = await asyncio.wait_for(ws.recv(), timeout=10)
+            auth = json.loads(auth_resp)
+            
+            if "error" in auth:
+                log.error("Auth failed: %s", auth["error"]["message"])
+                return None, None, None
+            
+            log.info("Authorized")
+            
+            # Fetch data with individual 10-second timeouts per request
+            h1  = await asyncio.wait_for(fetch_candles(ws, CFG.h1_tf, CFG.h1_count), timeout=10)
+            m15 = await asyncio.wait_for(fetch_candles(ws, CFG.m15_tf, CFG.m15_count), timeout=10)
+            m5  = await asyncio.wait_for(fetch_candles(ws, CFG.m5_tf, CFG.m5_count), timeout=10)
+            
+            return h1, m15, m5
+    except asyncio.TimeoutError:
+        log.error("The API connection timed out. Server might be busy.")
+        return None, None, None
+    except Exception as e:
+        log.error("Connection failed: %s", e)
+        return None, None, None
+        
     log.info("Analysis Complete. Checking for confluence...")
     # Add your print_report call here
 
