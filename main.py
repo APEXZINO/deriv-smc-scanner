@@ -87,37 +87,24 @@ def get_h1_structure(h1) -> str:
 # Ensure these functions are included as per your previous logic.
 
 # ── Execution ────────────────────────────────────────────────────────────────
-async def fetch_all():
-    try:
-        # Connect with a ping timeout to keep the connection alive
-        async with websockets.connect(CFG.uri, ping_timeout=10) as ws:
-            # Use wait_for to prevent infinite hangs during auth
-            await asyncio.wait_for(ws.send(json.dumps({"authorize": CFG.api_token})), timeout=10)
-            auth_resp = await asyncio.wait_for(ws.recv(), timeout=10)
-            auth = json.loads(auth_resp)
-            
-            if "error" in auth:
-                log.error("Auth failed: %s", auth["error"]["message"])
-                return None, None, None
-            
-            log.info("Authorized")
-            
-            # Fetch data with individual 10-second timeouts per request
-            h1  = await asyncio.wait_for(fetch_candles(ws, CFG.h1_tf, CFG.h1_count), timeout=10)
-            m15 = await asyncio.wait_for(fetch_candles(ws, CFG.m15_tf, CFG.m15_count), timeout=10)
-            m5  = await asyncio.wait_for(fetch_candles(ws, CFG.m5_tf, CFG.m5_count), timeout=10)
-            
-            return h1, m15, m5
-    except asyncio.TimeoutError:
-        log.error("The API connection timed out. Server might be busy.")
-        return None, None, None
-    except Exception as e:
-        log.error("Connection failed: %s", e)
-        return None, None, None
-        
+# ── Execution block (Make sure this is at the very bottom) ──
+async def run_scan():
+    h1, m15, m5 = await fetch_all()
+    if h1 is None: 
+        log.warning("No data returned from API. Skipping report.")
+        return
     log.info("Analysis Complete. Checking for confluence...")
-    # Add your print_report call here
+    
+    # Ensure this function call matches your previous logic
+    h1_bias = get_h1_structure(h1)
+    ob_zones = detect_order_blocks(h1, h1_bias)
+    m15_bias = get_m15_bias(m15)
+    m15_data = analyze_m15(m15)
+    signals = generate_signals(m5, h1_bias, ob_zones, m15_bias, m15_data)
+    result = build_trade_plans(signals, ob_zones, atr(h1, 7).iloc[-1])
+    
+    print_report(result, h1_bias, m15_bias, ob_zones, datetime.now(timezone.utc).strftime("%H:%M:%S UTC"))
 
 if __name__ == "__main__":
     asyncio.run(run_scan())
-  
+    
