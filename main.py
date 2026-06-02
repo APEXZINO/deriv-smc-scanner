@@ -7,8 +7,35 @@ import websockets
 # from your_module import generate_smc_signals
 
 async def fetch_deriv_data():
-    # Placeholder for your data fetching logic
-    pass
+    uri = "wss://ws.binaryws.com/websockets/v3?app_id=1089"
+    async with websockets.connect(uri) as websocket:
+        # 1. Authorize
+        await websocket.send(json.dumps({"authorize": "eHDQAIUyPXvtgLL"}))
+        await websocket.recv()
+        
+        # 2. Request Candles (M30)
+        request = {
+            "ticks_history": "R_100",
+            "adjust_start_time": 1,
+            "count": 100,
+            "end": "latest",
+            "style": "candles",
+            "granularity": 1800
+        }
+        await websocket.send(json.dumps(request))
+        response = await websocket.recv()
+        data = json.loads(response)
+        
+        # 3. Process into DataFrame
+        candles = data.get('candles', [])
+        if not candles:
+            return None
+        
+        df = pd.DataFrame(candles)
+        df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close'}, inplace=True)
+        return df
+        
+        
 
 async def main():
     print("Connecting and Authorizing with Deriv...")
