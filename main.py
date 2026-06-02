@@ -5,11 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-# ── Logging ─────────────────────────────────────────────────────────────
+# ── Logging Configuration ───────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
-# ── Configuration ───────────────────────────────────────────────────────
+# ── Configuration Object ────────────────────────────────────────────────
 @dataclass
 class Config:
     api_token: str = "eHDQAIUyPXvtgLL"
@@ -34,16 +34,29 @@ def atr(df, n=7):
     tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift()).abs(), (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
     return tr.ewm(span=n, adjust=False).mean()
 
-# ── Logic Stubs ────────────────────────────────────────────────────────
-def get_h1_structure(h1): return "NEUTRAL"
-def get_m15_bias(m15): return "NEUTRAL"
-def detect_order_blocks(h1, bias): return {}
-def analyze_m15(m15): return {}
-def generate_signals(m5, h1_bias, ob, m15_bias, m15_data): return pd.DataFrame()
-def build_trade_plans(signals, ob, atr_val): return []
-def print_report(res, h1, m15, ob, time): print(f"Report: {time}")
+# ── Strategy Logic Stubs (Your SMC Logic Goes Here) ─────────────────────
+def get_h1_structure(h1: pd.DataFrame) -> str: 
+    return "NEUTRAL"
 
-# ── Data Fetching ──────────────────────────────────────────────────────
+def get_m15_bias(m15: pd.DataFrame) -> str: 
+    return "NEUTRAL"
+
+def detect_order_blocks(h1: pd.DataFrame, bias: str) -> dict: 
+    return {}
+
+def analyze_m15(m15: pd.DataFrame) -> dict: 
+    return {}
+
+def generate_signals(m5: pd.DataFrame, h1_b, ob, m15_b, m15_d) -> pd.DataFrame: 
+    return m5
+
+def build_trade_plans(signals, ob, atr_val) -> list: 
+    return []
+
+def print_report(res, h1, m15, ob, time): 
+    log.info(f"Report generation complete for {time}")
+
+# ── Data Fetching Logic ────────────────────────────────────────────────
 async def fetch_candles(ws, g, c):
     await ws.send(json.dumps({"ticks_history": CFG.symbol, "adjust_start_time": 1, "count": c, "end": "latest", "style": "candles", "granularity": g}))
     resp = json.loads(await ws.recv())
@@ -68,10 +81,11 @@ async def fetch_all():
         log.error(f"Connection failed: {e}")
         return None, None, None
 
-# ── Execution ──────────────────────────────────────────────────────────
+# ── Execution Block ────────────────────────────────────────────────────
 async def run_scan():
     h1, m15, m5 = await fetch_all()
     if h1 is None: return
+    
     log.info("Analysis Complete. Checking for confluence...")
     h1_b = get_h1_structure(h1)
     ob = detect_order_blocks(h1, h1_b)
@@ -79,6 +93,7 @@ async def run_scan():
     m15_d = analyze_m15(m15)
     sig = generate_signals(m5, h1_b, ob, m15_b, m15_d)
     res = build_trade_plans(sig, ob, atr(h1, 7).iloc[-1])
+    
     print_report(res, h1_b, m15_b, ob, datetime.now(timezone.utc).strftime("%H:%M"))
 
 if __name__ == "__main__":
