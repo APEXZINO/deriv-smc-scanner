@@ -53,8 +53,7 @@ async def main():
         print("Analyzing Synthetic Market Patterns...")
         analyzed_df = generate_smc_signals(df)
         signals = analyzed_df[analyzed_df['Signal'] != 'HOLD']
-        
-         if not signals.empty:
+        if not signals.empty:
             print("\n🚨 MATCHING SMC/ICT SETUP DETECTED 🚨")
             signals = signals.copy()
             signals['TP (1:2 RR)'] = 0.0
@@ -65,11 +64,10 @@ async def main():
                 elif row['Signal'] == 'SELL':
                     risk = row['High'] - row['Close']
                     signals.at[idx, 'TP (1:2 RR)'] = round(row['Close'] - (risk * 2), 2)
-            
-            print(signals[['Open', 'High', 'Low', 'Close', 'TP (1:2 RR)', 'Signal']].tail(5).to_string())
-        else:
+       print(signals[['Open', 'High', 'Low', 'Close', 'TP (1:2 RR)', 'Signal']].tail(5).to_string())
+     else:
             print("\nMarkets Scanned. No valid FVG + MSS mitigation zones forming right now.")
-          
+        
     else:
         print("Failed to pull market history. Verify your API token credentials.")
 
