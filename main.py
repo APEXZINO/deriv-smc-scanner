@@ -34,7 +34,7 @@ def atr(df, n=7):
     tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift()).abs(), (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
     return tr.ewm(span=n, adjust=False).mean()
 
-# ── Logic Stubs (Fill these with your specific strategy logic) ──────────
+# ── Logic Stubs ────────────────────────────────────────────────────────
 def get_h1_structure(h1): return "NEUTRAL"
 def get_m15_bias(m15): return "NEUTRAL"
 def detect_order_blocks(h1, bias): return {}
