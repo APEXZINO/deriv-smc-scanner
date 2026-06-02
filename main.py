@@ -37,13 +37,24 @@ async def fetch_deriv_data():
         
         
 def generate_smc_signals(df):
-    # This is the placeholder logic for your analysis
-    # Ensure this processes the 'df' correctly
-    df['Signal'] = 'HOLD' 
+    # Ensure numeric data
+    df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].apply(pd.to_numeric)
     
-    # [Insert your actual SMC/ICT logic here]
+    # 1. Detect Bullish FVG (Institutional Buying Pressure)
+    # Candle 1 High < Candle 3 Low
+    df['Bullish_FVG'] = (df['High'].shift(2) < df['Low'])
+    
+    # 2. Detect Bearish FVG (Institutional Selling Pressure)
+    # Candle 1 Low > Candle 3 High
+    df['Bearish_FVG'] = (df['Low'].shift(2) > df['High'])
+    
+    # Generate Signal Logic
+    df['Signal'] = 'HOLD'
+    df.loc[df['Bullish_FVG'], 'Signal'] = 'BUY'
+    df.loc[df['Bearish_FVG'], 'Signal'] = 'SELL'
     
     return df
+    
 
 
 async def main():
