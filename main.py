@@ -10,15 +10,17 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class Config:
-    api_token: str = "eHDQAIUyPXvtgLL"; app_id: str = "1089"; symbol: str = "R_75"
-    h1_tf: int = 3600; m15_tf: int = 900; m5_tf: int = 300
-    h1_count: int = 100; m15_count: int = 120; m5_count: int = 150
-    rr_ratio: float = 2.0; ob_lookback: int = 30; ob_min_body_ratio: float = 0.5
-    ob_proximity_pct: float = 0.3; swing_lookback: int = 5; min_fvg_pct: float = 0.03
-    rsi_period: int = 7; rsi_overbought: float = 70.0; rsi_oversold: float = 30.0
-    body_ratio_min: float = 0.45; cooldown_bars: int = 4; session_filter: bool = True; require_mss: bool = True
+    api_token: str = "eHDQAIUyPXvtgLL"
+    app_id:    str = "1089"
+    symbol:    str = "R_75"
+    # ... (all your other settings) ...
+
+    @property
+    def uri(self) -> str:
+        return f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"
 
 CFG = Config()
+
 
 # --- UTILS ---
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
