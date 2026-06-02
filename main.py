@@ -1,47 +1,61 @@
-import asyncio
-import json
-import logging
-from dataclasses import dataclass, field
+
+import asyncio, json, logging, sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 import pandas as pd
 import websockets
 
-# ── Logging ────────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s",
+                    datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CONFIG  — edit this section only
+#  CONFIG  — edit only this block
 # ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class Config:
-    # Deriv credentials
-    api_token: str = "eHDQAIUyPXvtgLL"
-    app_id:    str = "1089"
-
-    # Symbol
-    symbol: str = "R_75"
+    api_token: str  = "eHDQAIUyPXvtgLL"
+    app_id:    str  = "1089"
+    symbol:    str  = "R_75"
 
     # Timeframes (seconds)
-    ltf_granularity: int = 1800    # M30 — entry timeframe
-    htf_granularity: int = 14400   # H4  — bias timeframe
+    h1_tf:  int = 3600   # H1  — structure + OB
+    m15_tf: int = 900    # M15 — bias + sweep + MSS
+    m5_tf:  int = 300    # M5  — FVG entry trigger
 
     # Candle counts
-    ltf_count: int = 150
-    htf_count: int = 100
+    h1_count:  int = 100
+    m15_count: int = 120
+    m5_count:  int = 150
+
+    # Risk / Reward
+    rr_ratio:   float = 2.0   # TP2 multiplier
+    partial_tp: float = 0.5   # 50% closed at TP1
+
+    # Order Block settings
+    ob_lookback:       int   = 30    # H1 bars to scan
+    ob_min_body_ratio: float = 0.5   # minimum body strength for a valid OB candle
+    ob_proximity_pct:  float = 0.3   # M5 price tolerance to OB zone (%)
 
     # Signal filters
-    rr_ratio:          float = 2.0    # Risk:Reward multiplier
-    min_fvg_pct:       float = 0.05   # Min FVG size as % of price (filters micro gaps)
-    swing_lookback:    int   = 10     # Bars to look back for swing highs/lows
-    session_filter:    bool  = False  # Set True to restrict to London/NY hours
-    require_mss:       bool  = True   # Require Market Structure Shift confirmation
+    swing_lookback: int   = 5
+    min_fvg_pct:    float = 0.03    # minimum M5 FVG size (%)
+    rsi_period:     int   = 7
+    rsi_overbought: float = 70.0
+    rsi_oversold:   float = 30.0
+    body_ratio_min: float = 0.45
+    cooldown_bars:  int   = 4       # M5 bars between same-direction signals
+    session_filter: bool  = True    # restrict to London / NY kill zones
+    require_mss:    bool  = True
+
+    # Live scanning
+    live_mode:       bool = True
+    scan_interval_s: int  = 300     # 5 minutes
 
     @property
     def uri(self) -> str:
@@ -52,412 +66,429 @@ CFG = Config()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  WEBSOCKET — fetch candles for any granularity
+#  WEBSOCKET
 # ══════════════════════════════════════════════════════════════════════════════
-async def fetch_candles(ws, symbol: str, granularity: int, count: int) -> pd.DataFrame | None:
-    request = {
-        "ticks_history": symbol,
-        "adjust_start_time": 1,
-        "count": count,
-        "end": "latest",
-        "style": "candles",
+async def fetch_candles(ws, granularity: int, count: int) -> Optional[pd.DataFrame]:
+    await ws.send(json.dumps({
+        "ticks_history": CFG.symbol, "adjust_start_time": 1,
+        "count": count, "end": "latest", "style": "candles",
         "granularity": granularity,
-    }
-    await ws.send(json.dumps(request))
-    response = json.loads(await ws.recv())
-
-    if "error" in response:
-        log.error("Candle fetch error (%ds): %s", granularity, response["error"]["message"])
+    }))
+    resp = json.loads(await ws.recv())
+    if "error" in resp:
+        log.error("Fetch error (%ds): %s", granularity, resp["error"]["message"])
         return None
-
-    candles = response.get("candles", [])
+    candles = resp.get("candles", [])
     if not candles:
         return None
-
     df = pd.DataFrame(candles)
-    df.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close"}, inplace=True)
-    df[["Open", "High", "Low", "Close"]] = df[["Open", "High", "Low", "Close"]].apply(
-        pd.to_numeric, errors="coerce"
-    )
+    df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
+    df[["Open","High","Low","Close"]] = df[["Open","High","Low","Close"]].apply(pd.to_numeric, errors="coerce")
     df["Time"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
     df.set_index("Time", inplace=True)
     df.drop(columns=["epoch"], inplace=True)
     return df
 
 
-async def fetch_all_data() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    """Open a single WebSocket session and fetch both HTF and LTF candles."""
+async def fetch_all():
     try:
         async with websockets.connect(CFG.uri, ping_timeout=15) as ws:
-            # Authorize
             await ws.send(json.dumps({"authorize": CFG.api_token}))
             auth = json.loads(await ws.recv())
             if "error" in auth:
                 log.error("Auth failed: %s", auth["error"]["message"])
-                return None, None
-            log.info("Authorized — account: %s", auth.get("authorize", {}).get("loginid", "?"))
-
-            # Fetch HTF (H4) for bias
-            log.info("Fetching H4 candles for trend bias...")
-            htf_df = await fetch_candles(ws, CFG.symbol, CFG.htf_granularity, CFG.htf_count)
-
-            # Fetch LTF (M30) for entries
-            log.info("Fetching M30 candles for entry analysis...")
-            ltf_df = await fetch_candles(ws, CFG.symbol, CFG.ltf_granularity, CFG.ltf_count)
-
-            return htf_df, ltf_df
-
-    except websockets.exceptions.WebSocketException as e:
-        log.error("WebSocket error: %s", e)
-        return None, None
-    except asyncio.TimeoutError:
-        log.error("Connection timed out.")
-        return None, None
+                return None, None, None
+            log.info("Authorized  %s", auth.get("authorize", {}).get("loginid", "?"))
+            log.info("Fetching H1...")
+            h1  = await fetch_candles(ws, CFG.h1_tf,  CFG.h1_count)
+            log.info("Fetching M15...")
+            m15 = await fetch_candles(ws, CFG.m15_tf, CFG.m15_count)
+            log.info("Fetching M5...")
+            m5  = await fetch_candles(ws, CFG.m5_tf,  CFG.m5_count)
+            return h1, m15, m5
+    except (websockets.exceptions.WebSocketException, asyncio.TimeoutError) as e:
+        log.error("Connection error: %s", e)
+        return None, None, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  INDICATOR HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-def ema(series: pd.Series, period: int) -> pd.Series:
-    return series.ewm(span=period, adjust=False).mean()
+def ema(s: pd.Series, n: int) -> pd.Series:
+    return s.ewm(span=n, adjust=False).mean()
 
+def rsi(s: pd.Series, n: int) -> pd.Series:
+    d = s.diff()
+    g = d.clip(lower=0).ewm(span=n, adjust=False).mean()
+    l = (-d.clip(upper=0)).ewm(span=n, adjust=False).mean()
+    return 100 - (100 / (1 + g / l.replace(0, float("nan"))))
 
-def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - df["Close"].shift()).abs(),
-        (df["Low"]  - df["Close"].shift()).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
+def atr(df: pd.DataFrame, n: int = 7) -> pd.Series:
+    tr = pd.concat([df["High"]-df["Low"],
+                    (df["High"]-df["Close"].shift()).abs(),
+                    (df["Low"] -df["Close"].shift()).abs()], axis=1).max(axis=1)
+    return tr.ewm(span=n, adjust=False).mean()
 
+def body_ratio(df: pd.DataFrame) -> pd.Series:
+    return (df["Close"]-df["Open"]).abs() / (df["High"]-df["Low"]).replace(0, float("nan"))
 
-def swing_highs(df: pd.DataFrame, lookback: int) -> pd.Series:
-    """True where a candle is the highest high in ±lookback bars."""
-    return df["High"] == df["High"].rolling(lookback * 2 + 1, center=True).max()
+def swing_highs(df: pd.DataFrame, n: int) -> pd.Series:
+    return df["High"] == df["High"].rolling(n*2+1, center=True).max()
 
-
-def swing_lows(df: pd.DataFrame, lookback: int) -> pd.Series:
-    """True where a candle is the lowest low in ±lookback bars."""
-    return df["Low"] == df["Low"].rolling(lookback * 2 + 1, center=True).min()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  ANALYSIS LAYERS
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── Layer 1: HTF Bias ──────────────────────────────────────────────────────────
-def get_htf_bias(htf_df: pd.DataFrame) -> str:
-    """
-    Determine higher-timeframe trend direction using EMA 50/200 crossover
-    and slope confirmation.
-    Returns 'BULLISH', 'BEARISH', or 'NEUTRAL'.
-    """
-    df = htf_df.copy()
-    df["EMA50"]  = ema(df["Close"], 50)
-    df["EMA200"] = ema(df["Close"], 200)
-
-    last = df.iloc[-1]
-    prev = df.iloc[-3]  # 3-bar slope check
-
-    ema50_sloping_up   = last["EMA50"]  > prev["EMA50"]
-    ema200_sloping_up  = last["EMA200"] > prev["EMA200"]
-    price_above_ema50  = last["Close"]  > last["EMA50"]
-    price_above_ema200 = last["Close"]  > last["EMA200"]
-    emas_bullish_cross = last["EMA50"]  > last["EMA200"]
-
-    bull_score = sum([ema50_sloping_up, ema200_sloping_up, price_above_ema50,
-                      price_above_ema200, emas_bullish_cross])
-
-    if bull_score >= 4:
-        return "BULLISH"
-    elif bull_score <= 1:
-        return "BEARISH"
-    else:
-        return "NEUTRAL"
-
-
-# ── Layer 2: Liquidity Sweep Detection ────────────────────────────────────────
-def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    """
-    A liquidity sweep occurs when price wicks beyond a recent swing high/low
-    but CLOSES back inside — smart money grabbing stops before reversing.
-
-    Bullish sweep: wick below swing low, close above it  → expect BUY
-    Bearish sweep: wick above swing high, close below it → expect SELL
-    """
-    df = df.copy()
-    df["SwingHigh"] = swing_highs(df, lookback)
-    df["SwingLow"]  = swing_lows(df, lookback)
-
-    # Rolling recent swing levels (last N bars)
-    df["RecentSwingHigh"] = df["High"].where(df["SwingHigh"]).ffill()
-    df["RecentSwingLow"]  = df["Low"].where(df["SwingLow"]).ffill()
-
-    # Bullish sweep: low dips below prior swing low but close recovers above it
-    df["BullishSweep"] = (
-        (df["Low"]   < df["RecentSwingLow"].shift(1)) &
-        (df["Close"] > df["RecentSwingLow"].shift(1))
-    )
-
-    # Bearish sweep: high pokes above prior swing high but close falls back below
-    df["BearishSweep"] = (
-        (df["High"]  > df["RecentSwingHigh"].shift(1)) &
-        (df["Close"] < df["RecentSwingHigh"].shift(1))
-    )
-
-    return df
-
-
-# ── Layer 3: Fair Value Gap (FVG) ─────────────────────────────────────────────
-def detect_fvg(df: pd.DataFrame, min_fvg_pct: float) -> pd.DataFrame:
-    """
-    Valid FVG = gap between candle[i-2] and candle[i] with NO overlap on candle[i-1].
-    Size filter removes micro gaps that are just noise.
-    """
-    df = df.copy()
-
-    # Bullish FVG: candle[i-2] high < candle[i] low
-    bull_gap = df["Low"] - df["High"].shift(2)
-    df["Bullish_FVG"]      = (bull_gap > 0) & (bull_gap / df["Close"] > min_fvg_pct / 100)
-    df["Bullish_FVG_Size"] = bull_gap.clip(lower=0)
-
-    # Bearish FVG: candle[i-2] low > candle[i] high
-    bear_gap = df["Low"].shift(2) - df["High"]
-    df["Bearish_FVG"]      = (bear_gap > 0) & (bear_gap / df["Close"] > min_fvg_pct / 100)
-    df["Bearish_FVG_Size"] = bear_gap.clip(lower=0)
-
-    return df
-
-
-# ── Layer 4: Market Structure Shift (MSS) ─────────────────────────────────────
-def detect_mss(df: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    """
-    Bullish MSS: in a recent downtrend, price breaks above the last significant
-                 lower high — structure shifts bullish.
-    Bearish MSS: in a recent uptrend, price breaks below the last significant
-                 higher low — structure shifts bearish.
-    """
-    df = df.copy()
-
-    # Rolling max/min over lookback window (excluding current bar)
-    roll_high = df["High"].shift(1).rolling(lookback).max()
-    roll_low  = df["Low"].shift(1).rolling(lookback).min()
-
-    df["Bullish_MSS"] = df["Close"] > roll_high   # break of structure up
-    df["Bearish_MSS"] = df["Close"] < roll_low    # break of structure down
-
-    return df
-
-
-# ── Layer 5: Session Filter (UTC) ─────────────────────────────────────────────
-def is_kill_zone(timestamp) -> bool:
-    """
-    London Kill Zone:    02:00 – 05:00 UTC
-    New York Kill Zone:  12:00 – 15:00 UTC
-    """
-    hour = timestamp.hour if hasattr(timestamp, "hour") else pd.Timestamp(timestamp).hour
-    return (2 <= hour < 5) or (12 <= hour < 15)
+def swing_lows(df: pd.DataFrame, n: int) -> pd.Series:
+    return df["Low"] == df["Low"].rolling(n*2+1, center=True).min()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SIGNAL COMBINER
+#  LAYER 1 — H1: STRUCTURE BIAS + ORDER BLOCK
 # ══════════════════════════════════════════════════════════════════════════════
-def generate_confluence_signals(
-    ltf_df: pd.DataFrame,
-    htf_bias: str,
-) -> pd.DataFrame:
+def get_h1_structure(h1: pd.DataFrame) -> str:
+    """EMA 21/50 trend. Both must slope in the same direction."""
+    df = h1.copy()
+    df["E21"] = ema(df["Close"], 21)
+    df["E50"] = ema(df["Close"], 50)
+    last, prev = df.iloc[-1], df.iloc[-3]
+    bull = (last["E21"] > last["E50"] and last["Close"] > last["E21"]
+            and last["E21"] > prev["E21"] and last["E50"] > prev["E50"])
+    bear = (last["E21"] < last["E50"] and last["Close"] < last["E21"]
+            and last["E21"] < prev["E21"] and last["E50"] < prev["E50"])
+    return "BULLISH" if bull else "BEARISH" if bear else "NEUTRAL"
+
+
+def detect_order_blocks(h1: pd.DataFrame, bias: str) -> dict:
     """
-    Combine all layers into a high-confluence signal.
-    A BUY fires only when:
-      - HTF bias is BULLISH
-      - Bullish liquidity sweep occurred within last 3 bars
-      - Bullish FVG is present
-      - MSS confirms bullish break (if enabled)
-      - Current bar is in a kill zone (if session filter enabled)
+    BULLISH OB: last strong red candle before a bullish MSS. Zone = body range.
+                Unmitigated = no close below OB low since formation.
+                SL anchor   = wick low.
+
+    BEARISH OB: last strong green candle before a bearish MSS. Zone = body range.
+                Unmitigated = no close above OB high since formation.
+                SL anchor   = wick high.
     """
-    df = ltf_df.copy()
+    df = h1.copy()
+    df["BR"]       = body_ratio(df)
+    df["IsBull"]   = df["Close"] > df["Open"]
+    df["IsBear"]   = df["Close"] < df["Open"]
+    rn             = 5
+    df["RollHigh"] = df["High"].shift(1).rolling(rn).max()
+    df["RollLow"]  = df["Low"].shift(1).rolling(rn).min()
+    df["BullMSS"]  = df["Close"] > df["RollHigh"]
+    df["BearMSS"]  = df["Close"] < df["RollLow"]
 
-    # Apply analysis layers
-    df = detect_liquidity_sweeps(df, CFG.swing_lookback)
-    df = detect_fvg(df, CFG.min_fvg_pct)
-    if CFG.require_mss:
-        df = detect_mss(df, CFG.swing_lookback)
-    else:
-        df["Bullish_MSS"] = True
-        df["Bearish_MSS"] = True
+    lkb    = df.iloc[-CFG.ob_lookback:]
+    result = {"bullish_ob": None, "bearish_ob": None}
 
-    # Sweep within last 3 bars (sweep happens, then FVG forms on pullback)
-    recent_bull_sweep = df["BullishSweep"].rolling(3).max().astype(bool)
-    recent_bear_sweep = df["BearishSweep"].rolling(3).max().astype(bool)
+    # Bullish OB
+    if bias == "BULLISH":
+        for mss_idx in reversed(lkb[lkb["BullMSS"]].index.tolist()):
+            cands = lkb.loc[:mss_idx].iloc[:-1]
+            cands = cands[cands["IsBear"] & (cands["BR"] >= CFG.ob_min_body_ratio)]
+            if cands.empty: continue
+            ob  = cands.iloc[-1]
+            hi  = max(ob["Open"], ob["Close"])
+            lo  = min(ob["Open"], ob["Close"])
+            if df.loc[ob.name:]["Low"].min() < lo: continue   # mitigated
+            result["bullish_ob"] = {"time": ob.name,
+                                    "ob_high": round(hi, 4), "ob_low": round(lo, 4),
+                                    "wick_low": round(ob["Low"], 4)}
+            break
 
-    # Session filter
-    if CFG.session_filter:
-        in_session = df.index.map(is_kill_zone)
-    else:
-        in_session = pd.Series(True, index=df.index)
+    # Bearish OB
+    if bias == "BEARISH":
+        for mss_idx in reversed(lkb[lkb["BearMSS"]].index.tolist()):
+            cands = lkb.loc[:mss_idx].iloc[:-1]
+            cands = cands[cands["IsBull"] & (cands["BR"] >= CFG.ob_min_body_ratio)]
+            if cands.empty: continue
+            ob  = cands.iloc[-1]
+            hi  = max(ob["Open"], ob["Close"])
+            lo  = min(ob["Open"], ob["Close"])
+            if df.loc[ob.name:]["High"].max() > hi: continue  # mitigated
+            result["bearish_ob"] = {"time": ob.name,
+                                    "ob_high": round(hi, 4), "ob_low": round(lo, 4),
+                                    "wick_high": round(ob["High"], 4)}
+            break
 
-    # BUY confluence
-    buy_signal = (
-        (htf_bias == "BULLISH") &
-        recent_bull_sweep &
-        df["Bullish_FVG"] &
-        df["Bullish_MSS"] &
-        in_session
-    )
+    return result
 
-    # SELL confluence
-    sell_signal = (
-        (htf_bias == "BEARISH") &
-        recent_bear_sweep &
-        df["Bearish_FVG"] &
-        df["Bearish_MSS"] &
-        in_session
-    )
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAYER 2 — M15: BIAS + SWEEP + MSS
+# ══════════════════════════════════════════════════════════════════════════════
+def get_m15_bias(m15: pd.DataFrame) -> str:
+    """EMA 8/21 momentum — must match H1 direction."""
+    df = m15.copy()
+    df["E8"]  = ema(df["Close"], 8)
+    df["E21"] = ema(df["Close"], 21)
+    last, prev = df.iloc[-1], df.iloc[-2]
+    if last["E8"] > last["E21"] and last["Close"] > last["E8"] and last["E8"] > prev["E8"]: return "BULLISH"
+    if last["E8"] < last["E21"] and last["Close"] < last["E8"] and last["E8"] < prev["E8"]: return "BEARISH"
+    return "NEUTRAL"
+
+
+def analyze_m15(m15: pd.DataFrame) -> dict:
+    """
+    Liquidity sweep: wick beyond swing level, close back inside.
+    MSS: close beyond rolling structure high/low.
+    Returns scalar flags consumed by generate_signals.
+    """
+    df = m15.copy()
+    n  = CFG.swing_lookback
+    df["RSH"] = df["High"].where(swing_highs(df, n)).ffill()
+    df["RSL"] = df["Low"].where(swing_lows(df,  n)).ffill()
+    df["BullSweep"] = (df["Low"] < df["RSL"].shift(1)) & (df["Close"] > df["RSL"].shift(1))
+    df["BearSweep"] = (df["High"] > df["RSH"].shift(1)) & (df["Close"] < df["RSH"].shift(1))
+    df["BullMSS"]   = df["Close"] > df["High"].shift(1).rolling(n).max()
+    df["BearMSS"]   = df["Close"] < df["Low"].shift(1).rolling(n).min()
+    return {
+        "bull_sweep": bool(df["BullSweep"].tail(5).any()),
+        "bear_sweep": bool(df["BearSweep"].tail(5).any()),
+        "bull_mss":   bool(df["BullMSS"].tail(3).any()),
+        "bear_mss":   bool(df["BearMSS"].tail(3).any()),
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  LAYER 3 — M5: FVG INSIDE H1 OB ZONE
+# ══════════════════════════════════════════════════════════════════════════════
+def _in_ob(price: float, ob: dict) -> bool:
+    tol = price * (CFG.ob_proximity_pct / 100)
+    return (ob["ob_low"] - tol) <= price <= (ob["ob_high"] + tol)
+
+
+def generate_signals(m5: pd.DataFrame, h1_bias: str,
+                     ob_zones: dict, m15_bias: str, m15_data: dict) -> pd.DataFrame:
+    """
+    Entry on M5 fires only when ALL three layers align:
+      H1  : trend confirmed + unmitigated OB exists
+      M15 : bias matches + sweep + MSS
+      M5  : FVG inside H1 OB + RSI ok + momentum candle + session + cooldown
+    """
+    df = m5.copy()
+
+    # M5 indicators
+    bg = df["Low"] - df["High"].shift(2)
+    sg = df["Low"].shift(2) - df["High"]
+    ms = CFG.min_fvg_pct / 100
+    df["Bullish_FVG"] = (bg > 0) & (bg / df["Close"] > ms)
+    df["Bearish_FVG"] = (sg > 0) & (sg / df["Close"] > ms)
+    df["RSI"]         = rsi(df["Close"], CFG.rsi_period).round(2)
+    df["BodyRatio"]   = body_ratio(df).round(3)
+    df["ATR"]         = atr(df, 7)
+
+    bias_bull = (h1_bias == "BULLISH") and (m15_bias == "BULLISH")
+    bias_bear = (h1_bias == "BEARISH") and (m15_bias == "BEARISH")
+
+    ob_bull = ob_zones.get("bullish_ob")
+    ob_bear = ob_zones.get("bearish_ob")
+
+    in_bull_ob = (df["Close"].apply(lambda p: _in_ob(p, ob_bull))
+                  if bias_bull and ob_bull else pd.Series(False, index=df.index))
+    in_bear_ob = (df["Close"].apply(lambda p: _in_ob(p, ob_bear))
+                  if bias_bear and ob_bear else pd.Series(False, index=df.index))
+
+    bull_sweep = pd.Series(m15_data["bull_sweep"], index=df.index)
+    bear_sweep = pd.Series(m15_data["bear_sweep"], index=df.index)
+    bull_mss   = pd.Series(m15_data["bull_mss"] if CFG.require_mss else True, index=df.index)
+    bear_mss   = pd.Series(m15_data["bear_mss"] if CFG.require_mss else True, index=df.index)
+
+    rsi_ok_buy  = df["RSI"] < CFG.rsi_overbought
+    rsi_ok_sell = df["RSI"] > CFG.rsi_oversold
+    momentum    = df["BodyRatio"] >= CFG.body_ratio_min
+
+    def kz(ts):
+        h = pd.Timestamp(ts).hour
+        return (0 <= h < 2) or (2 <= h < 5) or (12 <= h < 15)
+
+    session = (pd.Series([kz(t) for t in df.index], index=df.index)
+               if CFG.session_filter else pd.Series(True, index=df.index))
+
+    buy_cond  = bias_bull & df["Bullish_FVG"] & in_bull_ob & bull_sweep & bull_mss & rsi_ok_buy  & momentum & session
+    sell_cond = bias_bear & df["Bearish_FVG"] & in_bear_ob & bear_sweep & bear_mss & rsi_ok_sell & momentum & session
 
     df["Signal"] = "HOLD"
-    df.loc[buy_signal,  "Signal"] = "BUY"
-    df.loc[sell_signal, "Signal"] = "SELL"
+    df.loc[buy_cond,  "Signal"] = "BUY"
+    df.loc[sell_cond, "Signal"] = "SELL"
 
-    # Confluence score (0–4) for signal quality rating
-    df["Confluence"] = 0
-    df.loc[buy_signal  | sell_signal, "Confluence"] += 1
-    df.loc[(buy_signal  & df["Bullish_MSS"]) | (sell_signal & df["Bearish_MSS"]), "Confluence"] += 1
-    df.loc[(buy_signal  & recent_bull_sweep) | (sell_signal & recent_bear_sweep), "Confluence"] += 1
-    df.loc[in_session,  "Confluence"] += 1
+    # Cooldown — suppress signals too close together
+    last_bar: dict = {"BUY": -999, "SELL": -999}
+    suppress = set()
+    for idx in df.index:
+        sig = df.at[idx, "Signal"]
+        if sig in ("BUY", "SELL"):
+            pos = df.index.get_loc(idx)
+            if pos - last_bar[sig] < CFG.cooldown_bars:
+                suppress.add(idx)
+            else:
+                last_bar[sig] = pos
+    df.loc[list(suppress), "Signal"] = "HOLD"
+
+    # Confluence score (max 9)
+    act = df["Signal"] != "HOLD"
+    df["Score"] = 0
+    df.loc[act,                              "Score"] += 1   # FVG
+    df.loc[act & in_bull_ob & buy_cond,      "Score"] += 2   # OB zone (double weight)
+    df.loc[act & in_bear_ob & sell_cond,     "Score"] += 2
+    df.loc[act & (bull_sweep | bear_sweep),  "Score"] += 1   # Sweep
+    df.loc[act & (bull_mss   | bear_mss),    "Score"] += 1   # MSS
+    df.loc[act & momentum,                   "Score"] += 1   # Momentum
+    df.loc[act & session,                    "Score"] += 1   # Session
+    df.loc[act & rsi_ok_buy  & buy_cond,     "Score"] += 1   # RSI clear
+    df.loc[act & rsi_ok_sell & sell_cond,    "Score"] += 1
 
     return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TRADE PLAN BUILDER
+#  TRADE PLAN
 # ══════════════════════════════════════════════════════════════════════════════
-def build_trade_plans(signals: pd.DataFrame) -> pd.DataFrame:
+def build_trade_plans(df: pd.DataFrame, ob_zones: dict, h1_atr: float) -> pd.DataFrame:
     """
-    Vectorized trade plan with:
-    - Entry  = Close of signal candle
-    - SL     = Below swing low (BUY) / Above swing high (SELL) + ATR buffer
-    - TP     = Entry ± (risk × RR ratio)
-    - Rating = signal quality label
+    SL  = OB wick extreme +/- 0.5x H1 ATR
+    TP1 = 1:1 RR  (close 50%, move SL to breakeven)
+    TP2 = 1:RR    (let rest run)
     """
-    s = signals.copy()
-    atr_series = atr(s, 14)
-
+    s         = df.copy()
     buy_mask  = s["Signal"] == "BUY"
     sell_mask = s["Signal"] == "SELL"
+    buf       = h1_atr * 0.5
+    ob_bull   = ob_zones.get("bullish_ob")
+    ob_bear   = ob_zones.get("bearish_ob")
 
-    s["Entry"] = s["Close"].round(4)
-    s["SL"]    = 0.0
-    s["TP"]    = 0.0
-    s["Risk"]  = 0.0
+    for col in ["Entry", "SL", "TP1", "TP2", "Risk"]:
+        s[col] = 0.0
+    s["OB_Zone"] = ""
+    s["Entry"]   = s["Close"].round(4)
 
-    # BUY plan: SL = recent swing low minus half ATR buffer
-    s.loc[buy_mask, "SL"] = (
-        s.loc[buy_mask, "RecentSwingLow"] - atr_series[buy_mask] * 0.5
-    ).round(4)
-    s.loc[buy_mask, "Risk"] = (s.loc[buy_mask, "Entry"] - s.loc[buy_mask, "SL"]).round(4)
-    s.loc[buy_mask, "TP"]   = (
-        s.loc[buy_mask, "Entry"] + s.loc[buy_mask, "Risk"] * CFG.rr_ratio
-    ).round(4)
+    if ob_bull and buy_mask.any():
+        sl = round(ob_bull["wick_low"] - buf, 4)
+        s.loc[buy_mask, "SL"]      = sl
+        s.loc[buy_mask, "Risk"]    = (s.loc[buy_mask, "Entry"] - sl).round(4)
+        s.loc[buy_mask, "TP1"]     = (s.loc[buy_mask, "Entry"] + s.loc[buy_mask, "Risk"]).round(4)
+        s.loc[buy_mask, "TP2"]     = (s.loc[buy_mask, "Entry"] + s.loc[buy_mask, "Risk"] * CFG.rr_ratio).round(4)
+        s.loc[buy_mask, "OB_Zone"] = f"{ob_bull['ob_low']} - {ob_bull['ob_high']}"
 
-    # SELL plan: SL = recent swing high plus half ATR buffer
-    s.loc[sell_mask, "SL"] = (
-        s.loc[sell_mask, "RecentSwingHigh"] + atr_series[sell_mask] * 0.5
-    ).round(4)
-    s.loc[sell_mask, "Risk"] = (s.loc[sell_mask, "SL"] - s.loc[sell_mask, "Entry"]).round(4)
-    s.loc[sell_mask, "TP"]   = (
-        s.loc[sell_mask, "Entry"] - s.loc[sell_mask, "Risk"] * CFG.rr_ratio
-    ).round(4)
+    if ob_bear and sell_mask.any():
+        sl = round(ob_bear["wick_high"] + buf, 4)
+        s.loc[sell_mask, "SL"]      = sl
+        s.loc[sell_mask, "Risk"]    = (sl - s.loc[sell_mask, "Entry"]).round(4)
+        s.loc[sell_mask, "TP1"]     = (s.loc[sell_mask, "Entry"] - s.loc[sell_mask, "Risk"]).round(4)
+        s.loc[sell_mask, "TP2"]     = (s.loc[sell_mask, "Entry"] - s.loc[sell_mask, "Risk"] * CFG.rr_ratio).round(4)
+        s.loc[sell_mask, "OB_Zone"] = f"{ob_bear['ob_low']} - {ob_bear['ob_high']}"
 
-    # Signal quality label
-    def rate(score):
-        if score >= 4: return "⭐⭐⭐ STRONG"
-        if score >= 3: return "⭐⭐   GOOD"
-        if score >= 2: return "⭐     WEAK"
-        return              "✗     SKIP"
+    def rate(n):
+        if n >= 8: return "PRIME"
+        if n >= 6: return "STRONG"
+        if n >= 4: return "GOOD"
+        return             "SKIP"
 
-    s["Rating"] = s["Confluence"].apply(rate)
-
+    s["Rating"] = s["Score"].apply(rate)
     return s
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DISPLAY
+#  REPORT
 # ══════════════════════════════════════════════════════════════════════════════
-def print_report(result: pd.DataFrame, htf_bias: str):
-    active = result[result["Signal"] != "HOLD"].copy()
+def print_report(result, h1_bias, m15_bias, ob_zones, scan_time):
+    active  = result[result["Signal"] != "HOLD"]
+    ob_bull = ob_zones.get("bullish_ob")
+    ob_bear = ob_zones.get("bearish_ob")
+    W       = 72
 
-    print("\n" + "═" * 65)
-    print("   SMC MULTI-CONFLUENCE SCANNER  ─  " + CFG.symbol)
-    print("═" * 65)
-    print(f"   HTF Bias (H4)  : {htf_bias}")
-    print(f"   Scanned        : {len(result)} M30 candles")
-    print(f"   Filters        : FVG + Liquidity Sweep + MSS + HTF Bias")
-    print(f"   Session Filter : {'ON (London/NY)' if CFG.session_filter else 'OFF'}")
-    print(f"   Min FVG Size   : {CFG.min_fvg_pct}%  |  RR: 1:{int(CFG.rr_ratio)}")
-    print("─" * 65)
+    def fmt_ob(ob, label):
+        if not ob: return f"  {label}: Not found / all mitigated"
+        t = ob["time"].strftime("%m-%d %H:%M") if hasattr(ob["time"], "strftime") else str(ob["time"])
+        tag = "<< BUY ZONE" if "bullish" in label.lower() else "<< SELL ZONE"
+        return f"  {label}: {ob['ob_low']} - {ob['ob_high']}  [{t} UTC]  {tag}"
+
+    print("\n" + "=" * W)
+    print(f"  SMC SCALPER  |  {CFG.symbol}  |  {scan_time}")
+    print(f"  H1 Structure+OB  >>  M15 Bias/Sweep/MSS  >>  M5 FVG-in-OB Entry")
+    print("=" * W)
+    print(f"  H1  Bias : {h1_bias}    M15 Bias : {m15_bias}")
+    print(fmt_ob(ob_bull, "H1 Bullish OB"))
+    print(fmt_ob(ob_bear, "H1 Bearish OB"))
+    print(f"  RR 1:{CFG.rr_ratio}  |  Partial TP: {int(CFG.partial_tp*100)}% at TP1  |  Session: {'ON (London/NY)' if CFG.session_filter else 'OFF'}")
+    print("-" * W)
 
     if active.empty:
-        print("\n  No high-confluence setups detected on current data.")
-        print("  All filters must align simultaneously — this is intentional.")
-        print("  Check back at London open (02:00 UTC) or NY open (12:00 UTC).\n")
-    else:
-        cols = ["Signal", "Entry", "SL", "TP", "Risk", "Rating"]
-        latest = active[cols].tail(5)
-        print(latest.to_string())
+        print("\n  Waiting for M5 FVG to form inside the H1 OB zone...")
+        if ob_bull: print(f"  BUY  -> watch M5 price approach {ob_bull['ob_low']} - {ob_bull['ob_high']}, then FVG forms.")
+        if ob_bear: print(f"  SELL -> watch M5 price approach {ob_bear['ob_low']} - {ob_bear['ob_high']}, then FVG forms.")
         print()
-
-        # Detailed breakdown of latest signal
+    else:
+        print(active[["Signal","Entry","SL","TP1","TP2","Risk","OB_Zone","RSI","Rating"]].tail(5).to_string())
+        print()
         last = active.iloc[-1]
-        print("─" * 65)
-        print(f"  LATEST SIGNAL BREAKDOWN")
+        d    = "LONG (BUY)" if last["Signal"] == "BUY" else "SHORT (SELL)"
+        print("-" * W)
+        print(f"  LATEST SIGNAL  >>  {d}")
         print(f"  Time    : {last.name.strftime('%Y-%m-%d %H:%M UTC')}")
-        print(f"  Signal  : {last['Signal']}")
-        print(f"  Entry   : {last['Entry']}")
-        print(f"  Stop Loss    : {last['SL']}  (swing-based + ATR buffer)")
-        print(f"  Take Profit  : {last['TP']}  (1:{int(CFG.rr_ratio)} RR)")
-        print(f"  Risk/pt  : {last['Risk']}")
-        print(f"  Rating   : {last['Rating']}")
-        print(f"  HTF Bias : {htf_bias}")
-        print(f"  Confluence confirmed: FVG ✓  Sweep ✓  MSS ✓  HTF ✓")
+        print(f"  Entry   : {last['Entry']}  (M5 FVG close inside H1 OB)")
+        print(f"  OB Zone : {last['OB_Zone']}")
+        print(f"  SL      : {last['SL']}  (OB wick + 0.5x H1 ATR buffer)")
+        print(f"  TP1 50% : {last['TP1']}  (close half, move SL to breakeven)")
+        print(f"  TP2 50% : {last['TP2']}  (let rest run  1:{CFG.rr_ratio})")
+        print(f"  Risk/pt : {last['Risk']}    RSI: {last['RSI']}    Rating: {last['Rating']}")
+        print(f"  Stack   : H1 OB + Trend  M15 Sweep + MSS  M5 FVG-in-OB  Momentum  all confirmed")
 
-    buys  = (active["Signal"] == "BUY").sum()
-    sells = (active["Signal"] == "SELL").sum()
-    print("─" * 65)
-    print(f"  Total  →  BUY: {buys}  |  SELL: {sells}  |  Skipped (HOLD): {len(result) - len(active)}")
-    print("═" * 65 + "\n")
+    buys, sells = (active["Signal"] == "BUY").sum(), (active["Signal"] == "SELL").sum()
+    print("-" * W)
+    print(f"  Signals  BUY: {buys}  SELL: {sells}  Filtered: {len(result) - len(active)}")
+    print("=" * W + "\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MAIN
+#  SCAN LOOP
 # ══════════════════════════════════════════════════════════════════════════════
+async def run_scan():
+    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    log.info("Scanning %s  %s", CFG.symbol, now)
+
+    h1, m15, m5 = await fetch_all()
+    if any(x is None for x in (h1, m15, m5)):
+        log.error("Data fetch incomplete. Will retry.")
+        return
+
+    h1_bias  = get_h1_structure(h1)
+    ob_zones = detect_order_blocks(h1, h1_bias)
+    h1_atr_v = float(atr(h1, 7).iloc[-1])
+    log.info("H1: %s | Bull OB: %s | Bear OB: %s", h1_bias,
+             "found" if ob_zones.get("bullish_ob") else "none",
+             "found" if ob_zones.get("bearish_ob") else "none")
+
+    if h1_bias == "NEUTRAL":
+        print(f"\n  [{now}] H1 NEUTRAL — waiting for directional bias.\n")
+        return
+
+    m15_bias = get_m15_bias(m15)
+    m15_data = analyze_m15(m15)
+    log.info("M15: %s | Sweep B/S=%s/%s | MSS B/S=%s/%s", m15_bias,
+             m15_data["bull_sweep"], m15_data["bear_sweep"],
+             m15_data["bull_mss"],   m15_data["bear_mss"])
+
+    signals = generate_signals(m5, h1_bias, ob_zones, m15_bias, m15_data)
+    result  = build_trade_plans(signals, ob_zones, h1_atr_v)
+    print_report(result, h1_bias, m15_bias, ob_zones, now)
+
+
 async def main():
-    print("\n╔══════════════════════════════════════════════════════════╗")
-    print("║   Advanced SMC Scanner  —  Starting up...               ║")
-    print("╚══════════════════════════════════════════════════════════╝\n")
+    print("\n+------------------------------------------------------------------+")
+    print("|  SMC SCALPER  |  H1 OB  >>  M15 Sweep/MSS  >>  M5 FVG Entry    |")
+    print("|  Deriv Synthetic Indices                                         |")
+    print("+------------------------------------------------------------------+\n")
 
-    htf_df, ltf_df = await fetch_all_data()
-
-    if htf_df is None or ltf_df is None:
-        log.error("Failed to fetch market data. Check credentials and connection.")
-        return
-
-    # Layer 1 — HTF bias from H4
-    htf_bias = get_htf_bias(htf_df)
-    log.info("H4 Trend Bias: %s", htf_bias)
-
-    if htf_bias == "NEUTRAL":
-        log.warning("HTF bias is NEUTRAL — no directional edge. Skipping signal generation.")
-        print("\n  Market is in consolidation on H4. No trades recommended.\n")
-        return
-
-    # Layers 2–5 — full confluence analysis
-    analyzed = generate_confluence_signals(ltf_df, htf_bias)
-
-    # Build trade plans for active signals
-    result = build_trade_plans(analyzed)
-
-    # Print report
-    print_report(result, htf_bias)
+    if CFG.live_mode:
+        print(f"  Live mode ON — rescanning every {CFG.scan_interval_s // 60} min (M5 close)")
+        print("  Ctrl+C to stop.\n")
+        try:
+            while True:
+                await run_scan()
+                await asyncio.sleep(CFG.scan_interval_s)
+        except KeyboardInterrupt:
+            print("\n  Scanner stopped.")
+            sys.exit(0)
+    else:
+        await run_scan()
 
 
 if __name__ == "__main__":
