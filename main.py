@@ -15,7 +15,7 @@ async def fetch_deriv_data():
         
         # 2. Request Candles (M30)
         request = {
-            "ticks_history": "R_100",
+            "ticks_history": "R_75",
             "adjust_start_time": 1,
             "count": 100,
             "end": "latest",
