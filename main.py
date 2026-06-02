@@ -13,7 +13,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ── Config (keep your original credentials as-is) ─────────────────────────────
+# ── Config ─────────────────────────────────────────────────────────────────────
 API_TOKEN   = "eHDQAIUyPXvtgLL"
 APP_ID      = "1089"
 SYMBOL      = "R_75"
@@ -87,24 +87,14 @@ async def fetch_deriv_data() -> pd.DataFrame | None:
 
 # ── SMC Signal Generation ──────────────────────────────────────────────────────
 def generate_smc_signals(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Detect Fair Value Gaps (FVG) using proper 3-candle structure:
-
-    Bullish FVG:  Candle[i-2].High < Candle[i].Low  (gap above candle 1, below candle 3)
-    Bearish FVG:  Candle[i-2].Low  > Candle[i].High (gap below candle 1, above candle 3)
-
-    Candle 2 (middle) is implicitly the body bridging the gap — the shift(2)
-    comparison already validates the gap exists across the 3-candle window.
-    """
     df = df.copy()
 
-    # Bullish FVG: prior high (2 bars ago) is below current low → gap up
+    # Bullish FVG: prior high (2 bars ago) is below current low
     df["Bullish_FVG"] = df["High"].shift(2) < df["Low"]
 
-    # Bearish FVG: prior low (2 bars ago) is above current high → gap down
+    # Bearish FVG: prior low (2 bars ago) is above current high
     df["Bearish_FVG"] = df["Low"].shift(2) > df["High"]
 
-    # Assign signal — bearish takes priority on a conflict (rare edge case)
     df["Signal"] = "HOLD"
     df.loc[df["Bullish_FVG"], "Signal"] = "BUY"
     df.loc[df["Bearish_FVG"], "Signal"] = "SELL"
@@ -114,12 +104,6 @@ def generate_smc_signals(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── Risk/Reward Calculation ────────────────────────────────────────────────────
 def calculate_targets(signals: pd.DataFrame, rr_ratio: float = 2.0) -> pd.DataFrame:
-    """
-    Vectorized 1:RR take-profit calculation.
-
-    BUY:  TP = Close + (Close - Low)  * rr_ratio
-    SELL: TP = Close - (High - Close) * rr_ratio
-    """
     signals = signals.copy()
 
     buy_mask  = signals["Signal"] == "BUY"
@@ -151,16 +135,13 @@ async def main():
     print("   SMC / ICT FVG Scanner — Deriv Synthetic Indices")
     print("=" * 55)
 
-    log.info("Connecting to Deriv WebSocket...")
     df = await fetch_deriv_data()
 
     if df is None or df.empty:
         log.error("Failed to pull market history. Verify your API token credentials.")
         return
 
-    log.info("Running SMC signal analysis...")
     analyzed_df = generate_smc_signals(df)
-
     active_signals = analyzed_df[analyzed_df["Signal"] != "HOLD"]
 
     if active_signals.empty:
@@ -168,15 +149,20 @@ async def main():
         return
 
     result = calculate_targets(active_signals)
+    
+    # --- New Logic to show latest signal ---
+    latest_signal = result.tail(1) 
+    print("\n🚨 MOST RECENT SETUP DETECTED 🚨\n")
+    print(latest_signal.to_string())
+    # ----------------------------------------
+    
     tp_col = [c for c in result.columns if c.startswith("TP")][0]
-
     display_cols = ["Open", "High", "Low", "Close", "SL", tp_col, "Signal"]
     latest = result[display_cols].tail(5)
 
-    print("\n🚨 MATCHING SMC/ICT SETUP DETECTED 🚨\n")
+    print("\n🚨 RECENT SIGNAL HISTORY 🚨\n")
     print(latest.to_string())
 
-    # Summary
     buys  = (result["Signal"] == "BUY").sum()
     sells = (result["Signal"] == "SELL").sum()
     print(f"\n  Total signals found → BUY: {buys}  |  SELL: {sells}")
@@ -185,3 +171,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+            
