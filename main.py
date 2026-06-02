@@ -104,7 +104,7 @@ async def fetch_deriv_data():
             "count": 100,
             "end": "latest",
             "style": "candles",
-            "granularity": 900 
+            "granularity": 1800 
         }
         
         await websocket.send(json.dumps(request))
