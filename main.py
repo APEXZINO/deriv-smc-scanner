@@ -5,64 +5,45 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+# ── Logging ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger(__name__)
 
+# ── Configuration ───────────────────────────────────────────────────────
 @dataclass
 class Config:
     api_token: str = "eHDQAIUyPXvtgLL"
-    app_id:    str = "1089"
-    symbol:    str = "R_75"
-    # ... (all your other settings) ...
-
+    app_id: str = "1089"
+    symbol: str = "R_75"
+    h1_tf: int = 3600
+    m15_tf: int = 900
+    m5_tf: int = 300
+    h1_count: int = 100
+    m15_count: int = 120
+    m5_count: int = 150
+    
     @property
     def uri(self) -> str:
         return f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"
 
 CFG = Config()
 
-
-# --- UTILS ---
+# ── Helper Functions ───────────────────────────────────────────────────
 def ema(s, n): return s.ewm(span=n, adjust=False).mean()
-def rsi(s, n):
-    d = s.diff(); g = d.clip(lower=0).ewm(span=n, adjust=False).mean()
-    l = (-d.clip(upper=0)).ewm(span=n, adjust=False).mean()
-    return 100 - (100 / (1 + g / l.replace(0, float("nan"))))
 def atr(df, n=7):
     tr = pd.concat([df["High"]-df["Low"], (df["High"]-df["Close"].shift()).abs(), (df["Low"]-df["Close"].shift()).abs()], axis=1).max(axis=1)
     return tr.ewm(span=n, adjust=False).mean()
 
-# --- LOGIC LAYERS ---
-def get_h1_structure(h1):
-    df = h1.copy()
-    df["E21"], df["E50"] = ema(df["Close"], 21), ema(df["Close"], 50)
-    last, prev = df.iloc[-1], df.iloc[-3]
-    if last["E21"] > last["E50"] and last["Close"] > last["E21"] and last["E21"] > prev["E21"]: return "BULLISH"
-    if last["E21"] < last["E50"] and last["Close"] < last["E21"] and last["E21"] < prev["E21"]: return "BEARISH"
-    return "NEUTRAL"
+# ── Logic Stubs (Fill these with your specific strategy logic) ──────────
+def get_h1_structure(h1): return "NEUTRAL"
+def get_m15_bias(m15): return "NEUTRAL"
+def detect_order_blocks(h1, bias): return {}
+def analyze_m15(m15): return {}
+def generate_signals(m5, h1_bias, ob, m15_bias, m15_data): return pd.DataFrame()
+def build_trade_plans(signals, ob, atr_val): return []
+def print_report(res, h1, m15, ob, time): print(f"Report: {time}")
 
-def detect_order_blocks(h1, bias):
-    # Paste your detect_order_blocks logic here
-    return {"bullish_ob": None, "bearish_ob": None}
-
-def analyze_m15(m15):
-    # Paste your analyze_m15 logic here
-    return {"bull_sweep": False, "bear_sweep": False, "bull_mss": False, "bear_mss": False}
-
-def generate_signals(m5, h1_bias, ob_zones, m15_bias, m15_data):
-    # Paste your generate_signals logic here
-    m5["Signal"] = "HOLD"
-    return m5
-
-def build_trade_plans(df, ob_zones, h1_atr):
-    # Paste your build_trade_plans logic here
-    df["Signal"] = "HOLD"
-    return df
-
-def print_report(result, h1_bias, m15_bias, ob_zones, scan_time):
-    print(f"Analysis Complete at {scan_time}")
-
-# --- EXECUTION ---
+# ── Data Fetching ──────────────────────────────────────────────────────
 async def fetch_candles(ws, g, c):
     await ws.send(json.dumps({"ticks_history": CFG.symbol, "adjust_start_time": 1, "count": c, "end": "latest", "style": "candles", "granularity": g}))
     resp = json.loads(await ws.recv())
@@ -78,6 +59,7 @@ async def fetch_all():
             await asyncio.wait_for(ws.send(json.dumps({"authorize": CFG.api_token})), timeout=10)
             auth = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
             if "error" in auth: return None, None, None
+            log.info("Authorized")
             h1 = await asyncio.wait_for(fetch_candles(ws, CFG.h1_tf, CFG.h1_count), timeout=10)
             m15 = await asyncio.wait_for(fetch_candles(ws, CFG.m15_tf, CFG.m15_count), timeout=10)
             m5 = await asyncio.wait_for(fetch_candles(ws, CFG.m5_tf, CFG.m5_count), timeout=10)
@@ -86,16 +68,18 @@ async def fetch_all():
         log.error(f"Connection failed: {e}")
         return None, None, None
 
+# ── Execution ──────────────────────────────────────────────────────────
 async def run_scan():
     h1, m15, m5 = await fetch_all()
     if h1 is None: return
-    h1_bias = get_h1_structure(h1)
-    ob_zones = detect_order_blocks(h1, h1_bias)
-    m15_bias = get_m15_bias(m15)
-    m15_data = analyze_m15(m15)
-    signals = generate_signals(m5, h1_bias, ob_zones, m15_bias, m15_data)
-    result = build_trade_plans(signals, ob_zones, atr(h1, 7).iloc[-1])
-    print_report(result, h1_bias, m15_bias, ob_zones, datetime.now(timezone.utc).strftime("%H:%M:%S"))
+    log.info("Analysis Complete. Checking for confluence...")
+    h1_b = get_h1_structure(h1)
+    ob = detect_order_blocks(h1, h1_b)
+    m15_b = get_m15_bias(m15)
+    m15_d = analyze_m15(m15)
+    sig = generate_signals(m5, h1_b, ob, m15_b, m15_d)
+    res = build_trade_plans(sig, ob, atr(h1, 7).iloc[-1])
+    print_report(res, h1_b, m15_b, ob, datetime.now(timezone.utc).strftime("%H:%M"))
 
 if __name__ == "__main__":
     asyncio.run(run_scan())
