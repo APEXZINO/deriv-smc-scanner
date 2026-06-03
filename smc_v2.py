@@ -137,7 +137,7 @@ def find_ob(h1, bias) -> dict:
     if bias == "BULLISH":
         for idx in reversed(lkb[lkb['BullMSS']].index.tolist()):
             pool = lkb.loc[:idx].iloc[-1]
-            pool = pool.loc[pool['IsBear'] == True]
+            pool = pool.loc[(pool['IsBull'] == True) & (pool['BR'] >= CFG.ob_min_body_ratio)]
             
             if pool.empty: continue
             ob = pool.iloc[-1]
