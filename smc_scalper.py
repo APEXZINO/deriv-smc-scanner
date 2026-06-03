@@ -133,7 +133,7 @@ def find_ob(h1, bias) -> dict:
     obs = {"bullish_ob": None, "bearish_ob": None}
     
     # ADDED LOGGING LINE
-    log.info(f"Scanning for OBs... Current Bias: {bias}")
+    log.info(f"Scanning for OBs... Current Bias: {bias}"
     if bias == "BULLISH":
         for idx in reversed(lkb[lkb['BullMSS']].index.tolist()):
             pool = lkb.loc[:idx].iloc[-1]
