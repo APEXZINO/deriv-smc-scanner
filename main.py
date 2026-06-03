@@ -47,9 +47,25 @@ def detect_order_blocks(h1: pd.DataFrame, bias: str) -> dict:
 def analyze_m15(m15: pd.DataFrame) -> dict: 
     return {}
 
-def generate_signals(m5: pd.DataFrame, h1_b, ob, m15_b, m15_d) -> pd.DataFrame: 
-    return m5
-
+def generate_signals(m5: pd.DataFrame, h1_bias, ob, m15_bias, m15_data) -> pd.DataFrame:
+    # 1. Define M5 Trigger (e.g., Close > Previous High for Bullish)
+    m5['Prev_High'] = m5['High'].shift(1)
+    m5['Signal'] = "NONE"
+    
+    # 2. Add Logic
+    if h1_bias == "BULLISH":
+        # Look for Bullish Break of Structure on M5
+        condition = (m5['Close'] > m5['Prev_High'])
+        m5.loc[condition, 'Signal'] = "BUY_ENTRY"
+        
+    elif h1_bias == "BEARISH":
+        # Look for Bearish Break of Structure on M5
+        m5['Prev_Low'] = m5['Low'].shift(1)
+        condition = (m5['Close'] < m5['Prev_Low'])
+        m5.loc[condition, 'Signal'] = "SELL_ENTRY"
+        
+    return m5[m5['Signal'] != "NONE"]
+    
 def build_trade_plans(signals, ob, atr_val) -> list: 
     return []
 
