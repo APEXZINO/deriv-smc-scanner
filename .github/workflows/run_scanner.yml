@@ -23,5 +23,5 @@ jobs:
         run: pip install pandas websockets
 
       - name: Run SMC Scanner
-        run: python smc_scalper.py
+        run: python smc_v2.py
 
