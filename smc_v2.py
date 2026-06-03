@@ -137,8 +137,10 @@ def find_ob(h1, bias) -> dict:
     if bias == "BULLISH":
         for idx in reversed(lkb[lkb['BullMSS']].index.tolist()):
             pool = lkb.loc[:idx].iloc[-1]
-            pool = pool.loc[(pool['IsBull'] == True) & (pool['BR'] >= CFG.ob_min_body_ratio)]
-            
+            # Replace the problematic pool line with these two lines:
+mask = (pool['IsBear'] == True) & (pool['BR'] >= CFG.ob_min_body_ratio)
+pool = pool[mask]
+
             if pool.empty: continue
             ob = pool.iloc[-1]
             hi, lo = max(ob['Open'], ob['Close']), min(ob['Open'], ob['Close'])
@@ -150,7 +152,9 @@ def find_ob(h1, bias) -> dict:
     elif bias == "BEARISH":
         for idx in reversed(lkb[lkb['BearMSS']].index.tolist()):
             pool = lkb.loc[:idx].iloc[-1]
-            pool = pool[pool['IsBull'] >= CFG.ob_min_body_ratio]
+            mask = (pool['IsBull'] == True) & (pool['BR'] >= CFG.ob_min_body_ratio)
+pool = pool[mask]
+
             if pool.empty: continue
             ob = pool.iloc[-1]
             hi, lo = max(ob['Open'], ob['Close']), min(ob['Open'], ob['Close'])
