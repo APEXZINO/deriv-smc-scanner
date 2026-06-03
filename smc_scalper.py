@@ -39,7 +39,7 @@ class Config:
     rsi_oversold:      float = 30.0
     body_ratio_min:    float = 0.45
     cooldown_bars:     int   = 4
-    session_filter:    bool  = false
+    session_filter:    bool  = False
     require_mss:       bool  = True
     live_mode:         bool  = False  # False = single scan (for GitHub Actions cron)
     scan_interval_s:   int   = 300    # only used when live_mode = True (local run)
