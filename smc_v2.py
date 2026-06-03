@@ -150,13 +150,15 @@ pool = pool[mask]
             break
 
     elif bias == "BEARISH":
-        for idx in reversed(lkb[lkb['BearMSS']].index.tolist()):
-            pool = lkb.loc[:idx].iloc[-1]
-            mask = (pool['IsBull'] == True) & (pool['BR'] >= CFG.ob_min_body_ratio)
-pool = pool[mask]
-
-            if pool.empty: continue
-            ob = pool.iloc[-1]
+            for idx in reversed(lkb[lkb['BearMSS']].index.tolist()):
+        pool = lkb.loc[:idx].iloc[-1]
+        mask = (pool['IsBull'] == True) & (pool['BR'] >= CFG.ob_min_body_ratio)
+        pool = pool[mask]
+        
+        # This line must be indented the same as 'mask' if pool.empty: 
+            continue
+        ob = pool.iloc[-1]
+                
             hi, lo = max(ob['Open'], ob['Close']), min(ob['Open'], ob['Close'])
             if df.loc[ob.name:]["High"].max() > hi: continue # mitigated
             obs["bearish_ob"] = {"time": ob.name, "ob_high": round(hi, 4),
