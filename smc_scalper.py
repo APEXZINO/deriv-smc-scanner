@@ -473,7 +473,6 @@ async def scan():
 
     if h1b == "NEUTRAL":
         print(f"\n  [{now}] H1 NEUTRAL — no bias. No trades.\n", flush=True)
-        send_telegram(f"✅ Scanner active at {now}\nH1: NEUTRAL — no trades right now.")
         return
 
     m15b = m15_bias(m15)
