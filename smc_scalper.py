@@ -242,7 +242,7 @@ def find_ob(h1, bias) -> dict:
             ob = pool.iloc[-1]
             hi = max(ob["Open"], ob["Close"])
             lo = min(ob["Open"], ob["Close"])
-            if df.loc[ob.name:]["Low"].min() < lo:
+            if df.loc[ob.name:]["Low"].min() < ob["Low"]:
                 continue  # mitigated
             obs["bullish_ob"] = {
                 "time":     ob.name,
@@ -261,7 +261,7 @@ def find_ob(h1, bias) -> dict:
             ob = pool.iloc[-1]
             hi = max(ob["Open"], ob["Close"])
             lo = min(ob["Open"], ob["Close"])
-            if df.loc[ob.name:]["High"].max() > hi:
+            if df.loc[ob.name:]["High"].max() > ob["High"]:
                 continue  # mitigated
             obs["bearish_ob"] = {
                 "time":      ob.name,
