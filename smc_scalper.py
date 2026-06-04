@@ -6,7 +6,7 @@ Notifications: Telegram alert on every valid signal
 
 import asyncio, json, logging, sys, urllib.request, urllib.parse
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 import pandas as pd
 import websockets
@@ -105,7 +105,7 @@ def build_alert(signal_row, obs, h1b, m15b) -> str:
         f"{icon}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"*Symbol:*  {CFG.symbol}\n"
-        f"*Time:*    {signal_row.name.strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"*Time:*    {signal_row.name.astimezone(timezone(timedelta(hours=1))).strftime('%Y-%m-%d %H:%M WAT')}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"*Entry:*   {signal_row['Entry']}\n"
         f"*SL:*      {signal_row['SL']}\n"
@@ -480,7 +480,8 @@ def report(result, h1b, m15b, obs, now):
 #  MAIN
 # =============================================================================
 async def scan():
-    now = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+    WAT = timezone(timedelta(hours=1))
+now = datetime.now(WAT).strftime("%H:%M:%S WAT")
     h1, m15, m5 = await fetch_all()
     if any(x is None for x in (h1, m15, m5)):
         log.error("Data fetch failed.")
