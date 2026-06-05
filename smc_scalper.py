@@ -27,7 +27,7 @@ WAT = timezone(timedelta(hours=1))
 @dataclass
 class Config:
     api_token: str = os.environ.get("DERIV_API_TOKEN", "")
-    app_id:    str = "1089"
+    app_id:    str = os.environ.get("DERIV_APP_ID", "1089")
     symbol:    str = "R_75"
 
     tg_token:   str = ""
@@ -54,7 +54,7 @@ class Config:
 
     @property
     def uri(self):
-        return f"wss://ws.binaryws.com/websockets/v3?app_id={self.app_id}"
+        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
 
 CFG = Config()
 
@@ -143,10 +143,12 @@ async def fetch_candles(ws, granularity, count) -> Optional[pd.DataFrame]:
 async def fetch_all():
     try:
         async with websockets.connect(CFG.uri, ping_timeout=15) as ws:
+            # Authorize with token
             await ws.send(json.dumps({"authorize": CFG.api_token}))
             auth = json.loads(await ws.recv())
             if "error" in auth:
                 log.error("Auth failed: %s", auth["error"]["message"])
+                log.error("Token used starts with: %s", CFG.api_token[:10] if CFG.api_token else "EMPTY")
                 return None, None, None
             log.info("Authorized: %s", auth.get("authorize", {}).get("loginid", "?"))
             h1  = await fetch_candles(ws, CFG.h1_tf,  CFG.h1_count)
@@ -459,9 +461,16 @@ def report(result, h1b, m15b, obs, now):
 # =============================================================================
 async def scan():
     now = datetime.now(WAT).strftime("%H:%M:%S WAT")
+
+    if not CFG.api_token:
+        log.error("DERIV_API_TOKEN secret is empty — check GitHub secrets.")
+        send_telegram("❌ Scanner error: DERIV_API_TOKEN is not set in GitHub secrets.")
+        return
+
     h1, m15, m5 = await fetch_all()
     if any(x is None for x in (h1, m15, m5)):
         log.error("Data fetch failed.")
+        send_telegram(f"❌ Scanner error at {now}: Could not fetch market data. Check API token.")
         return
 
     h1b  = h1_trend(h1)
@@ -501,4 +510,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-  
+    
