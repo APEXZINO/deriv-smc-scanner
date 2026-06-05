@@ -24,6 +24,7 @@ jobs:
 
       - name: Run SMC Scanner
         env:
+          DERIV_APP_ID: ${{ secrets.DERIV_APP_ID }}
           DERIV_API_TOKEN: ${{ secrets.DERIV_API_TOKEN }}
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
