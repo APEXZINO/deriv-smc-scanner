@@ -26,7 +26,7 @@ WAT = timezone(timedelta(hours=1))
 # =============================================================================
 @dataclass
 class Config:
-    api_token: str = "eHDQAIUyPXvtgLL"
+    api_token: str = "33tcEjX9B3LdBJuZWWJ1N"
     app_id:    str = "1089"
     symbol:    str = "R_75"
 
