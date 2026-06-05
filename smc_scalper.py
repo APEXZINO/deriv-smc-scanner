@@ -26,7 +26,7 @@ WAT = timezone(timedelta(hours=1))
 # =============================================================================
 @dataclass
 class Config:
-    api_token: str = os.environ.get("DERIV_API_TOKEN")
+    api_token: str = os.environ.get("DERIV_API_TOKEN") # Pulls the secret
     app_id:    str = "1089"
     symbol:    str = "R_75"
 
