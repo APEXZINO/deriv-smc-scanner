@@ -1,15 +1,15 @@
 """
 SMC Scalper — Deriv Synthetic Indices
 Stack: H1 (Structure + OB) >> M15 (Bias + Sweep + MSS) >> M5 (FVG inside OB)
+Uses Deriv REST API (compatible with new pat_ tokens)
 Notifications: Telegram alert on every valid signal
 """
 
-import asyncio, json, logging, sys, urllib.request, urllib.parse, os
+import asyncio, json, logging, sys, urllib.request, urllib.parse, os, time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 import pandas as pd
-import websockets
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,15 +27,14 @@ WAT = timezone(timedelta(hours=1))
 @dataclass
 class Config:
     api_token: str = os.environ.get("DERIV_API_TOKEN", "")
-    app_id:    str = os.environ.get("DERIV_APP_ID", "1089")
     symbol:    str = "R_75"
 
     tg_token:   str = ""
     tg_chat_id: str = ""
 
-    h1_tf:  int = 3600;  h1_count:  int = 150
-    m15_tf: int = 900;   m15_count: int = 120
-    m5_tf:  int = 300;   m5_count:  int = 150
+    h1_count:  int = 150
+    m15_count: int = 120
+    m5_count:  int = 150
 
     rr_ratio:          float = 1.5
     ob_lookback:       int   = 80
@@ -52,10 +51,6 @@ class Config:
     require_mss:       bool  = True
     live_mode:         bool  = False
 
-    @property
-    def uri(self):
-        return f"wss://ws.derivws.com/websockets/v3?app_id={self.app_id}"
-
 CFG = Config()
 
 if os.environ.get("TG_TOKEN"):
@@ -69,7 +64,7 @@ if os.environ.get("TG_CHAT_ID"):
 # =============================================================================
 def send_telegram(message: str):
     if not CFG.tg_token or not CFG.tg_chat_id:
-        log.info("Telegram not configured — skipping alert.")
+        log.info("Telegram not configured — skipping.")
         return
     try:
         url  = f"https://api.telegram.org/bot{CFG.tg_token}/sendMessage"
@@ -78,7 +73,9 @@ def send_telegram(message: str):
             "text":       message,
             "parse_mode": "Markdown"
         }).encode()
-        urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=10)
+        urllib.request.urlopen(
+            urllib.request.Request(url, data=data), timeout=10
+        )
         log.info("Telegram alert sent.")
     except Exception as e:
         log.error("Telegram error: %s", e)
@@ -89,12 +86,12 @@ def build_alert(row, obs, h1b, m15b) -> str:
     icon = "🟢 *BUY (LONG)*" if sig == "BUY" else "🔴 *SELL (SHORT)*"
     ob   = obs.get("bullish_ob") if sig == "BUY" else obs.get("bearish_ob")
     zone = f"{ob['ob_low']} - {ob['ob_high']}" if ob else "N/A"
-    time = row.name.astimezone(WAT).strftime("%Y-%m-%d %H:%M WAT")
+    t    = row.name.astimezone(WAT).strftime("%Y-%m-%d %H:%M WAT")
     return (
         f"{icon}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"*Symbol:*  {CFG.symbol}\n"
-        f"*Time:*    {time}\n"
+        f"*Time:*    {t}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"*Entry:*   {row['Entry']}\n"
         f"*SL:*      {row['SL']}\n"
@@ -108,56 +105,71 @@ def build_alert(row, obs, h1b, m15b) -> str:
         f"*RSI:*        {row['RSI']}\n"
         f"*Rating:*     {row['Rating']}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_H1 OB + M15 Sweep + MSS + M5 FVG all confirmed_"
+        f"_H1 OB + M15 Sweep + MSS + M5 FVG confirmed_"
     )
 
 
 # =============================================================================
-#  WEBSOCKET
+#  DATA FETCHING — Deriv REST API (works with pat_ tokens)
 # =============================================================================
-async def fetch_candles(ws, granularity, count) -> Optional[pd.DataFrame]:
-    await ws.send(json.dumps({
+def fetch_candles_rest(granularity_seconds: int, count: int) -> Optional[pd.DataFrame]:
+    """
+    Fetch candles using Deriv REST API.
+    Granularity: 3600=H1, 900=M15, 300=M5
+    """
+    end_time   = int(time.time())
+    start_time = end_time - (granularity_seconds * count * 2)
+
+    params = urllib.parse.urlencode({
         "ticks_history":     CFG.symbol,
         "adjust_start_time": 1,
         "count":             count,
-        "end":               "latest",
+        "end":               end_time,
+        "start":             start_time,
         "style":             "candles",
-        "granularity":       granularity,
-    }))
-    resp = json.loads(await ws.recv())
-    if "error" in resp or not resp.get("candles"):
-        log.error("Fetch error %ds: %s", granularity,
-                  resp.get("error", {}).get("message", "no candles"))
-        return None
-    df = pd.DataFrame(resp["candles"])
-    df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
-    df[["Open","High","Low","Close"]] = df[["Open","High","Low","Close"]].apply(
-        pd.to_numeric, errors="coerce"
-    )
-    df["Time"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
-    df.set_index("Time", inplace=True)
-    df.drop(columns=["epoch"], inplace=True)
-    return df
+        "granularity":       granularity_seconds,
+    })
 
+    url = f"https://api.deriv.com/api/v2/ticks_history?{params}"
+    headers = {
+        "Authorization": f"Bearer {CFG.api_token}",
+        "Content-Type":  "application/json",
+    }
 
-async def fetch_all():
     try:
-        async with websockets.connect(CFG.uri, ping_timeout=15) as ws:
-            # Authorize with token
-            await ws.send(json.dumps({"authorize": CFG.api_token}))
-            auth = json.loads(await ws.recv())
-            if "error" in auth:
-                log.error("Auth failed: %s", auth["error"]["message"])
-                log.error("Token used starts with: %s", CFG.api_token[:10] if CFG.api_token else "EMPTY")
-                return None, None, None
-            log.info("Authorized: %s", auth.get("authorize", {}).get("loginid", "?"))
-            h1  = await fetch_candles(ws, CFG.h1_tf,  CFG.h1_count)
-            m15 = await fetch_candles(ws, CFG.m15_tf, CFG.m15_count)
-            m5  = await fetch_candles(ws, CFG.m5_tf,  CFG.m5_count)
-            return h1, m15, m5
-    except (websockets.exceptions.WebSocketException, asyncio.TimeoutError) as e:
-        log.error("Connection error: %s", e)
-        return None, None, None
+        req  = urllib.request.Request(url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=15)
+        data = json.loads(resp.read().decode())
+
+        candles = data.get("candles", [])
+        if not candles:
+            log.error("No candles returned for granularity %d", granularity_seconds)
+            return None
+
+        df = pd.DataFrame(candles)
+        df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close"}, inplace=True)
+        df[["Open","High","Low","Close"]] = df[["Open","High","Low","Close"]].apply(
+            pd.to_numeric, errors="coerce"
+        )
+        df["Time"] = pd.to_datetime(df["epoch"], unit="s", utc=True)
+        df.set_index("Time", inplace=True)
+        df.drop(columns=["epoch"], inplace=True)
+        return df
+
+    except Exception as e:
+        log.error("REST fetch error (%ds): %s", granularity_seconds, e)
+        return None
+
+
+def fetch_all_rest():
+    """Fetch H1, M15, M5 via REST API."""
+    log.info("Fetching H1...")
+    h1  = fetch_candles_rest(3600, CFG.h1_count)
+    log.info("Fetching M15...")
+    m15 = fetch_candles_rest(900,  CFG.m15_count)
+    log.info("Fetching M5...")
+    m5  = fetch_candles_rest(300,  CFG.m5_count)
+    return h1, m15, m5
 
 
 # =============================================================================
@@ -459,23 +471,27 @@ def report(result, h1b, m15b, obs, now):
 # =============================================================================
 #  MAIN
 # =============================================================================
-async def scan():
+def scan():
     now = datetime.now(WAT).strftime("%H:%M:%S WAT")
 
     if not CFG.api_token:
-        log.error("DERIV_API_TOKEN secret is empty — check GitHub secrets.")
-        send_telegram("❌ Scanner error: DERIV_API_TOKEN is not set in GitHub secrets.")
+        log.error("DERIV_API_TOKEN is empty.")
+        send_telegram("❌ Scanner error: DERIV_API_TOKEN not set.")
         return
 
-    h1, m15, m5 = await fetch_all()
+    h1, m15, m5 = fetch_all_rest()
+
     if any(x is None for x in (h1, m15, m5)):
         log.error("Data fetch failed.")
-        send_telegram(f"❌ Scanner error at {now}: Could not fetch market data. Check API token.")
+        send_telegram(f"❌ Scanner error at {now}: Could not fetch market data.")
         return
+
+    log.info("Data fetched successfully.")
 
     h1b  = h1_trend(h1)
     obs  = find_ob(h1, h1b)
     h1av = float(atr(h1, 7).iloc[-1])
+
     log.info("H1: %s | Bull OB: %s | Bear OB: %s", h1b,
              "found" if obs.get("bullish_ob") else "none",
              "found" if obs.get("bearish_ob") else "none")
@@ -486,6 +502,7 @@ async def scan():
 
     m15b = m15_bias(m15)
     ctx  = m15_context(m15)
+
     log.info("M15: %s | Sweep B=%s S=%s | MSS B=%s S=%s",
              m15b, ctx["bull_sweep"], ctx["bear_sweep"],
              ctx["bull_mss"], ctx["bear_mss"])
@@ -495,19 +512,19 @@ async def scan():
     report(result, h1b, m15b, obs, now)
 
 
-async def main():
-    print("SMC Scalper | H1 OB >> M15 Sweep/MSS >> M5 FVG | Deriv", flush=True)
+def main():
+    print("SMC Scalper | H1 OB >> M15 Sweep/MSS >> M5 FVG | Deriv REST API", flush=True)
     if CFG.live_mode:
         try:
             while True:
-                await scan()
-                await asyncio.sleep(300)
+                scan()
+                time.sleep(300)
         except KeyboardInterrupt:
             print("Stopped.")
             sys.exit(0)
     else:
-        await scan()
+        scan()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
     
