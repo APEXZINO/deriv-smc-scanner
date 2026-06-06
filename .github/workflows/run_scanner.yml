@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run:  pip install pandas
+        run:  pip install pandas websockets
 
       - name: Run SMC Scanner
         env:
