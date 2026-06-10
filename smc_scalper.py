@@ -1,11 +1,10 @@
 """
 SMC Scalper — Deriv Synthetic Indices
 Stack: H1 (Structure + OB) >> M15 (Bias + Sweep + MSS) >> M5 (FVG inside OB)
-Uses Deriv public WebSocket — NO token required for market data
-Notifications: Telegram alert on every valid signal
+No auth needed | HTML Telegram | 8hr signal cooldown
 """
 
-import asyncio, json, logging, sys, urllib.request, urllib.parse, os
+import asyncio, json, logging, sys, urllib.request, urllib.parse, os, time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -27,7 +26,6 @@ WAT = timezone(timedelta(hours=1))
 # =============================================================================
 @dataclass
 class Config:
-    # No API token needed — Deriv market data is public
     app_id: str = "1089"
     symbol: str = "R_75"
 
@@ -52,6 +50,7 @@ class Config:
     session_filter:    bool  = False
     require_mss:       bool  = True
     live_mode:         bool  = False
+    cooldown_hours:    int   = 8
 
     @property
     def uri(self):
@@ -66,18 +65,59 @@ if os.environ.get("TG_CHAT_ID"):
 
 
 # =============================================================================
-#  TELEGRAM
+#  SIGNAL COOLDOWN
+# =============================================================================
+COOLDOWN_FILE = "smc_cooldown.json"
+
+def load_cooldown() -> dict:
+    try:
+        if os.path.exists(COOLDOWN_FILE):
+            with open(COOLDOWN_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_cooldown(data: dict):
+    try:
+        with open(COOLDOWN_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        log.error("Cooldown save error: %s", e)
+
+def is_duplicate(signal: str, entry: float) -> bool:
+    key = f"{CFG.symbol}_{signal}_{round(entry, 1)}"
+    cooldown = load_cooldown()
+    if key in cooldown:
+        hours = (time.time() - cooldown[key]) / 3600
+        if hours < CFG.cooldown_hours:
+            log.info("Duplicate suppressed: %s (%.1fh ago)", key, hours)
+            return True
+    return False
+
+def mark_sent(signal: str, entry: float):
+    key = f"{CFG.symbol}_{signal}_{round(entry, 1)}"
+    cooldown = load_cooldown()
+    now = time.time()
+    cooldown = {k: v for k, v in cooldown.items() if now - v < 86400}
+    cooldown[key] = now
+    save_cooldown(cooldown)
+    log.info("Signal recorded: %s", key)
+
+
+# =============================================================================
+#  TELEGRAM — HTML formatting
 # =============================================================================
 def send_telegram(message: str):
     if not CFG.tg_token or not CFG.tg_chat_id:
-        log.info("Telegram not configured — skipping.")
+        log.info("Telegram not configured.")
         return
     try:
         url  = f"https://api.telegram.org/bot{CFG.tg_token}/sendMessage"
         data = urllib.parse.urlencode({
             "chat_id":    CFG.tg_chat_id,
             "text":       message,
-            "parse_mode": "Markdown"
+            "parse_mode": "HTML"
         }).encode()
         urllib.request.urlopen(
             urllib.request.Request(url, data=data), timeout=10
@@ -89,34 +129,34 @@ def send_telegram(message: str):
 
 def build_alert(row, obs, h1b, m15b) -> str:
     sig  = row["Signal"]
-    icon = "🟢 *BUY (LONG)*" if sig == "BUY" else "🔴 *SELL (SHORT)*"
+    icon = "🟢 <b>BUY (LONG)</b>" if sig == "BUY" else "🔴 <b>SELL (SHORT)</b>"
     ob   = obs.get("bullish_ob") if sig == "BUY" else obs.get("bearish_ob")
     zone = f"{ob['ob_low']} - {ob['ob_high']}" if ob else "N/A"
     t    = row.name.astimezone(WAT).strftime("%Y-%m-%d %H:%M WAT")
     return (
         f"{icon}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Symbol:*  {CFG.symbol}\n"
-        f"*Time:*    {t}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*Entry:*   {row['Entry']}\n"
-        f"*SL:*      {row['SL']}\n"
-        f"*TP1:*     {row['TP1']}  _(close 50%, move SL to BE)_\n"
-        f"*TP2:*     {row['TP2']}  _(let rest run)_\n"
-        f"*Risk/pt:* {row['Risk']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"*H1 OB Zone:* {zone}\n"
-        f"*H1 Trend:*   {h1b}\n"
-        f"*M15 Bias:*   {m15b}\n"
-        f"*RSI:*        {row['RSI']}\n"
-        f"*Rating:*     {row['Rating']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"_H1 OB + M15 Sweep + MSS + M5 FVG confirmed_"
+        f"————————————————————\n"
+        f"<b>Symbol:</b>  {CFG.symbol}\n"
+        f"<b>Time:</b>    {t}\n"
+        f"————————————————————\n"
+        f"<b>Entry:</b>   {row['Entry']}\n"
+        f"<b>SL:</b>      {row['SL']}\n"
+        f"<b>TP1:</b>     {row['TP1']}  <i>(close 50%, move SL to BE)</i>\n"
+        f"<b>TP2:</b>     {row['TP2']}  <i>(let rest run)</i>\n"
+        f"<b>Risk/pt:</b> {row['Risk']}\n"
+        f"————————————————————\n"
+        f"<b>H1 OB Zone:</b> {zone}\n"
+        f"<b>H1 Trend:</b>   {h1b}\n"
+        f"<b>M15 Bias:</b>   {m15b}\n"
+        f"<b>RSI:</b>        {row['RSI']}\n"
+        f"<b>Rating:</b>     {row['Rating']}\n"
+        f"————————————————————\n"
+        f"<i>H1 OB + M15 Sweep + MSS + M5 FVG confirmed</i>"
     )
 
 
 # =============================================================================
-#  WEBSOCKET — no authentication needed for market data
+#  WEBSOCKET
 # =============================================================================
 async def fetch_candles(ws, granularity, count) -> Optional[pd.DataFrame]:
     await ws.send(json.dumps({
@@ -146,7 +186,6 @@ async def fetch_candles(ws, granularity, count) -> Optional[pd.DataFrame]:
 async def fetch_all():
     try:
         async with websockets.connect(CFG.uri, ping_timeout=15) as ws:
-            # No authorization needed — just fetch market data directly
             log.info("Connected to Deriv WebSocket.")
             h1  = await fetch_candles(ws, CFG.h1_tf,  CFG.h1_count)
             m15 = await fetch_candles(ws, CFG.m15_tf, CFG.m15_count)
@@ -444,7 +483,13 @@ def report(result, h1b, m15b, obs, now):
         print(f"     TP1:    {last['TP1']}  (close 50%, move SL to BE)", flush=True)
         print(f"     TP2:    {last['TP2']}  (let rest run)", flush=True)
         print(f"     Risk:   {last['Risk']}  |  RSI: {last['RSI']}  |  {last['Rating']}", flush=True)
-        send_telegram(build_alert(last, obs, h1b, m15b))
+
+        # Send Telegram with cooldown check
+        if not is_duplicate(last["Signal"], last["Entry"]):
+            send_telegram(build_alert(last, obs, h1b, m15b))
+            mark_sent(last["Signal"], last["Entry"])
+        else:
+            print("  Telegram: SKIPPED (duplicate — same signal sent recently)", flush=True)
 
     buys  = (active["Signal"] == "BUY").sum()
     sells = (active["Signal"] == "SELL").sum()
@@ -461,7 +506,7 @@ async def scan():
     h1, m15, m5 = await fetch_all()
     if any(x is None for x in (h1, m15, m5)):
         log.error("Data fetch failed.")
-        send_telegram(f"❌ Scanner error at {now}: Could not fetch market data.")
+        send_telegram(f"Scanner error at {now}: Could not fetch market data.")
         return
 
     h1b  = h1_trend(h1)
@@ -491,14 +536,4 @@ async def main():
     if CFG.live_mode:
         try:
             while True:
-                await scan()
-                await asyncio.sleep(300)
-        except KeyboardInterrupt:
-            print("Stopped.")
-            sys.exit(0)
-    else:
-        await scan()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-    
+          
