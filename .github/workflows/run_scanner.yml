@@ -2,7 +2,7 @@ name: Deriv SMC Scanner
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '* * * * *'
   workflow_dispatch:
 
 jobs:
