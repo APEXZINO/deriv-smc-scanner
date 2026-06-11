@@ -536,4 +536,13 @@ async def main():
     if CFG.live_mode:
         try:
             while True:
-          
+                await scan()
+                await asyncio.sleep(300)
+        except KeyboardInterrupt:
+            print("Stopped.")
+            sys.exit(0)
+    else:
+        await scan()
+
+if __name__ == "__main__":
+    asyncio.run(main())
